@@ -52,13 +52,17 @@
 	references must go through the loader, absolute paths, or remotes.
 	
 	"ClientOnly" or "ServerOnly" boolean attributes:
-	Allows you to restrict a module from being loaded on a specific run context.
-	
+	Allows you to restrict a module from being loaded on a specific run context. Also settable
+	on a Folder to cascade to every descendant ModuleScript. A descendant's own attribute
+	(including explicit `false`) overrides the cascade; among nested folders, the closest
+	ancestor wins.
+
 	"Parallel" boolean attribute:
 	Requires the module from another script within its own actor for executing code in parallel.
-	
+
 	"IgnoreLoader" boolean attribute:
-	Allows you to prevent a module from being loaded.
+	Allows you to prevent a module from being loaded. Also settable on a Folder to cascade to
+	every descendant ModuleScript (same override semantics as ClientOnly / ServerOnly).
 	
 	Supports CollectionService tags on ModuleScripts AND Folders. Tagging a Folder loads every
 	descendant ModuleScript (subject to ClientOnly / ServerOnly / IgnoreLoader filtering).
@@ -372,24 +376,47 @@ local function findAllFromClass(class: string, searchIn: Instance, searchDepth: 
 end
 
 local function keepModule(container: Instance, module: ModuleScript): boolean
-	if module:GetAttribute("ClientOnly") and RunService:IsServer() then
-		return false
-	elseif module:GetAttribute("ServerOnly") and RunService:IsClient() then
-		return false
-	elseif module:GetAttribute("IgnoreLoader") then
-		return false
-	end
-	local ancestor = module.Parent
+	-- ClientOnly / ServerOnly / IgnoreLoader cascade from Folder ancestors. A value
+	-- set directly on the module (including explicit `false`) wins over the cascade;
+	-- within the ancestor chain, the closest Folder with a non-nil value wins.
+	local clientOnly: any = module:GetAttribute("ClientOnly")
+	local serverOnly: any = module:GetAttribute("ServerOnly")
+	local ignore: any = module:GetAttribute("IgnoreLoader")
+
+	local ancestor: Instance? = module.Parent
+	local foundContainer = false
 	while ancestor do
+		if ancestor:IsA("Folder") then
+			if clientOnly == nil then
+				clientOnly = ancestor:GetAttribute("ClientOnly")
+			end
+			if serverOnly == nil then
+				serverOnly = ancestor:GetAttribute("ServerOnly")
+			end
+			if ignore == nil then
+				ignore = ancestor:GetAttribute("IgnoreLoader")
+			end
+		end
 		if ancestor == container then
-			-- The ancestry should eventually lead to the container (if ancestors were always folders)
-			return true
+			foundContainer = true
+			break
 		elseif not ancestor:IsA("Folder") then
 			return false
 		end
 		ancestor = ancestor.Parent
 	end
-	return false
+	if not foundContainer then
+		return false
+	end
+
+	if clientOnly and RunService:IsServer() then
+		return false
+	elseif serverOnly and RunService:IsClient() then
+		return false
+	elseif ignore then
+		return false
+	end
+	return true
 end
 
 local function newPrint(...)
@@ -441,6 +468,14 @@ local function getOrCreateMirroredParent(rootFolder: Folder, ancestors: { Instan
 		if SETTINGS.USE_COLLECTION_SERVICE and TAG ~= "" and CollectionService:HasTag(original, TAG) then
 			if not CollectionService:HasTag(current, TAG) then
 				CollectionService:AddTag(current, TAG)
+			end
+		end
+		-- Mirror cascade-relevant attributes so client-side keepModule resolves the
+		-- same run-context restrictions the user expressed on the original folder.
+		for _, attrName in ipairs({ "ClientOnly", "ServerOnly", "IgnoreLoader" }) do
+			local value = original:GetAttribute(attrName)
+			if value ~= nil and current:GetAttribute(attrName) == nil then
+				current:SetAttribute(attrName, value)
 			end
 		end
 	end
