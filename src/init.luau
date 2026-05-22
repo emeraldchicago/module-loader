@@ -39,9 +39,17 @@
 	Convention: when another module needs to access those children, the owning module should expose them
 	via its return table rather than other modules indexing for them.
 	
-	Setting both RelocateToServerScriptService and RelocateToReplicatedStorage on the same module emits
-	a warning and skips relocation. Modules already in ReplicatedStorage also emit a warning and are
-	skipped.
+	Setting both RelocateToServerScriptService and RelocateToReplicatedStorage directly on the same
+	module emits a warning and skips relocation. Modules already in ReplicatedStorage also emit a
+	warning and are skipped.
+
+	OPT-OUT FROM CASCADE: When a Folder ancestor cascades RelocateToReplicatedStorage, you can keep
+	specific descendant modules on the server by setting RelocateToServerScriptService = true on them
+	directly. Those modules skip the ReplicatedStorage pre-pass and are instead picked up by the
+	standard ServerScriptService relocation flow during loading.
+	NOTE: relative requires inside an RS-relocated module pointing at SSS opt-out siblings will not
+	resolve at runtime (the mirrored ReplicatedStorage folder doesn't contain them). Cross-realm
+	references must go through the loader, absolute paths, or remotes.
 	
 	"ClientOnly" or "ServerOnly" boolean attributes:
 	Allows you to restrict a module from being loaded on a specific run context.
@@ -462,13 +470,23 @@ local function relocateToReplicatedStoragePass(containers: { Instance })
 			if module:GetAttribute("_RelocatedService") ~= nil then
 				continue
 			end
-			if not isMarkedForReplicatedRelocation(module, container) then
-				continue
-			end
-			if module:GetAttribute("RelocateToServerScriptService") then
+			local directRS = module:GetAttribute("RelocateToReplicatedStorage") == true
+			local directSSS = module:GetAttribute("RelocateToServerScriptService") == true
+			-- Both attributes set directly on the same module is genuine user confusion;
+			-- warn and skip so neither relocation runs.
+			if directRS and directSSS then
 				newWarn(
 					`RelocateToReplicatedStorage conflicts with RelocateToServerScriptService on module '{module:GetFullName()}'; skipping relocation.`
 				)
+				continue
+			end
+			-- An explicit RelocateToServerScriptService on a descendant opts out of any
+			-- ancestor folder's RelocateToReplicatedStorage cascade. The SSS relocation
+			-- in loadModule.attemptRelocate will handle it during the load pass.
+			if directSSS then
+				continue
+			end
+			if not isMarkedForReplicatedRelocation(module, container) then
 				continue
 			end
 			-- A module already inside our destination is a child of a module that
