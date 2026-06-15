@@ -52,8 +52,13 @@
 			then resolves the same on client and server. The real module still exists only once,
 			in ReplicatedStorage.
 
-		Cascade: set on a Folder to relocate the whole subtree. Opt one descendant back
-		out by setting RelocateToServerScriptService = true on it.
+		Cascade: set on a Folder to relocate the whole subtree (folders discovered by a
+		container OR by LoaderTag).
+			A module's own value wins over an ancestor folder, closest folder wins among
+			nested folders. RelocateToReplicatedStorage = false on a module opts it out of
+			an ancestor's cascade while staying loadable on the server. RelocateToServerScriptService
+			= true opts out and hides it on the server instead. Only modules whose ancestry up
+			to the folder is made of Folders are relocated.
 
 		Gotchas:
 			Descendants of a relocated module (assets, child modules) move with it. Expose
@@ -529,29 +534,149 @@ local function getOrCreateMirroredParent(rootFolder: Folder, ancestors: { Instan
 end
 
 --[[
-	Returns true if <code>module</code> is marked for RelocateToReplicatedStorage either
-	directly or via a Folder ancestor (cascade) between it and <code>container</code>.
+	Returns true if <code>module</code> should be relocated to ReplicatedStorage. Mirrors keepModule's
+	cascade precedence: the module's own RelocateToReplicatedStorage value (including an explicit
+	<code>false</code>) wins, then the closest Folder ancestor up to and including <code>container</code>.
+	The ancestry up to <code>container</code> must be made of Folders only -- a module nested under a
+	non-folder (e.g. a child of another module) is not an independent relocation target; it moves with
+	its parent. Returns false if <code>container</code> is never reached.
 ]]
 local function isMarkedForReplicatedRelocation(module: ModuleScript, container: Instance): boolean
-	if module:GetAttribute("RelocateToReplicatedStorage") then
-		return true
-	end
-	local ancestor = module.Parent
-	while ancestor and ancestor ~= container do
-		if ancestor:IsA("Folder") and ancestor:GetAttribute("RelocateToReplicatedStorage") then
-			return true
+	local effective: any = module:GetAttribute("RelocateToReplicatedStorage")
+	local ancestor: Instance? = module.Parent
+	local foundContainer = false
+	while ancestor do
+		if ancestor:IsA("Folder") and effective == nil then
+			effective = ancestor:GetAttribute("RelocateToReplicatedStorage")
+		end
+		if ancestor == container then
+			-- Read the container's own value (above) before stopping; never walk past it.
+			foundContainer = true
+			break
+		elseif not ancestor:IsA("Folder") then
+			return false
 		end
 		ancestor = ancestor.Parent
 	end
-	return false
+	if not foundContainer then
+		return false
+	end
+	return effective == true
 end
 
 --[[
-	Server-only pre-pass: Walks each container for modules marked with
-	RelocateToReplicatedStorage (directly or via folder cascade) and moves each
-	to a mirrored hierarchy under ReplicatedStorage.RELOCATED_MODULES, leaving
-	a hierarchy-aware pointer behind so relative requires from neighboring
-	server modules still resolve.
+	Relocates a single module to ReplicatedStorage.RELOCATED_MODULES if eligible, leaving a
+	hierarchy-aware pointer behind. <code>container</code> is the discovery boundary the mirror is built
+	relative to. <code>seen</code> (keyed on the real module) guards a module reachable via both a
+	container and a tag. Returns the (possibly newly created) <code>destination</code> folder so the
+	caller's lazy creation stays threaded across calls.
+]]
+local function tryRelocateModule(
+	module: ModuleScript,
+	container: Instance,
+	seen: { [ModuleScript]: true },
+	relocatedTemplate: Instance,
+	destination: Folder?
+): Folder?
+	-- Pointers from previous passes (or overlapping containers) are already mirroring the real
+	-- module — never try to relocate one again.
+	if module:GetAttribute("_RelocatedService") ~= nil then
+		return destination
+	end
+	-- Set seen before any early return so a second discovery (e.g. via a tag) doesn't re-warn.
+	if seen[module] then
+		return destination
+	end
+	seen[module] = true
+
+	local directRS = module:GetAttribute("RelocateToReplicatedStorage") == true
+	local directSSS = module:GetAttribute("RelocateToServerScriptService") == true
+	-- Both attributes set directly on the same module is genuine user confusion;
+	-- warn and skip so neither relocation runs.
+	if directRS and directSSS then
+		newWarn(
+			`RelocateToReplicatedStorage conflicts with RelocateToServerScriptService on module '{module:GetFullName()}'; skipping relocation.`
+		)
+		return destination
+	end
+	-- An explicit RelocateToServerScriptService on a descendant opts out of any
+	-- ancestor folder's RelocateToReplicatedStorage cascade. The SSS relocation
+	-- in loadModule.attemptRelocate will handle it during the load pass.
+	if directSSS then
+		return destination
+	end
+	if not isMarkedForReplicatedRelocation(module, container) then
+		return destination
+	end
+	-- A module already inside our destination is a child of a module that
+	-- was relocated earlier in this same pass (children move with parents).
+	-- Skip silently — relocating it would tear the parent's subtree apart.
+	if REPLICATED_RELOCATED_MODULES and module:IsDescendantOf(REPLICATED_RELOCATED_MODULES) then
+		return destination
+	end
+	if module:IsDescendantOf(ReplicatedStorage) then
+		newWarn(
+			`RelocateToReplicatedStorage is enabled on module '{module:GetFullName()}' that's already in ReplicatedStorage; skipping.`
+		)
+		return destination
+	end
+
+	-- Collect ancestor folders between container (exclusive) and module's parent (inclusive)
+	local ancestors: { Instance } = {}
+	local cursor: Instance? = module.Parent
+	while cursor and cursor ~= container do
+		table.insert(ancestors, 1, cursor)
+		cursor = cursor.Parent
+	end
+	if cursor ~= container then
+		newWarn(
+			`Module '{module:GetFullName()}' is not a descendant of any provided container; skipping RelocateToReplicatedStorage.`
+		)
+		return destination
+	end
+
+	if not destination then
+		destination = ensureReplicatedRelocatedFolder()
+	end
+	local originalParent = module.Parent
+	local dottedPath = getDottedPathToContainer(module, container)
+	-- Record the module's full original ServerScriptService path so each client can
+	-- rebuild that hierarchy locally and drop a pointer at the leaf. This is what lets
+	-- SSS-pointing require paths (e.g. require(game.ServerScriptService.A.B.C)) resolve
+	-- on the client even though the real module now lives in ReplicatedStorage. The
+	-- attribute travels with the instance into RS and replicates to clients.
+	local originalSSSPath = getDottedPathFromService(module, ServerScriptService)
+	if originalSSSPath then
+		module:SetAttribute("_OriginalSSSPath", originalSSSPath)
+	end
+	local mirroredParent = getOrCreateMirroredParent(destination :: Folder, ancestors)
+
+	local pointer = relocatedTemplate:Clone()
+	pointer.Name = module.Name
+	pointer:SetAttribute("_RelocatedService", "ReplicatedStorage")
+	pointer:SetAttribute("_RelocatedPath", dottedPath)
+	-- Mirror loader-filter attributes onto the pointer so the server's main
+	-- load pass treats the pointer the same way it would treat the real module.
+	-- Without this, ClientOnly modules would be loaded by the server via
+	-- their pointer (because the pointer itself isn't tagged ClientOnly).
+	for _, attrName in ipairs({ "ClientOnly", "ServerOnly", "IgnoreLoader", "LoaderPriority", "Parallel" }) do
+		local value = module:GetAttribute(attrName)
+		if value ~= nil then
+			pointer:SetAttribute(attrName, value)
+		end
+	end
+
+	module.Parent = mirroredParent
+	pointer.Parent = originalParent
+	return destination
+end
+
+--[[
+	Server-only pre-pass: discovers modules the same way getModules does (each passed container,
+	plus CollectionService-tagged ModuleScripts and Folders when UseCollectionService is enabled)
+	and relocates the ones marked with RelocateToReplicatedStorage (directly or via folder cascade)
+	to a mirrored hierarchy under ReplicatedStorage.RELOCATED_MODULES, leaving a hierarchy-aware
+	pointer behind so relative requires from neighboring server modules still resolve.
 ]]
 local function relocateToReplicatedStoragePass(containers: { Instance })
 	if not RunService:IsServer() then
@@ -562,94 +687,31 @@ local function relocateToReplicatedStoragePass(containers: { Instance })
 	assert(relocatedTemplate, "ModuleLoader missing RelocatedTemplate child")
 
 	local destination: Folder? = nil
+	local seen: { [ModuleScript]: true } = {}
 
 	for _, container in ipairs(containers) do
-		local modules = findAllFromClass("ModuleScript", container) :: { ModuleScript }
-		for _, module in ipairs(modules) do
-			-- Pointers from previous passes (or overlapping containers) are already
-			-- mirroring the real module — never try to relocate one again.
-			if module:GetAttribute("_RelocatedService") ~= nil then
-				continue
-			end
-			local directRS = module:GetAttribute("RelocateToReplicatedStorage") == true
-			local directSSS = module:GetAttribute("RelocateToServerScriptService") == true
-			-- Both attributes set directly on the same module is genuine user confusion;
-			-- warn and skip so neither relocation runs.
-			if directRS and directSSS then
-				newWarn(
-					`RelocateToReplicatedStorage conflicts with RelocateToServerScriptService on module '{module:GetFullName()}'; skipping relocation.`
-				)
-				continue
-			end
-			-- An explicit RelocateToServerScriptService on a descendant opts out of any
-			-- ancestor folder's RelocateToReplicatedStorage cascade. The SSS relocation
-			-- in loadModule.attemptRelocate will handle it during the load pass.
-			if directSSS then
-				continue
-			end
-			if not isMarkedForReplicatedRelocation(module, container) then
-				continue
-			end
-			-- A module already inside our destination is a child of a module that
-			-- was relocated earlier in this same pass (children move with parents).
-			-- Skip silently — relocating it would tear the parent's subtree apart.
-			if REPLICATED_RELOCATED_MODULES and module:IsDescendantOf(REPLICATED_RELOCATED_MODULES) then
-				continue
-			end
-			if module:IsDescendantOf(ReplicatedStorage) then
-				newWarn(
-					`RelocateToReplicatedStorage is enabled on module '{module:GetFullName()}' that's already in ReplicatedStorage; skipping.`
-				)
-				continue
-			end
+		for _, module in ipairs(findAllFromClass("ModuleScript", container) :: { ModuleScript }) do
+			destination = tryRelocateModule(module, container, seen, relocatedTemplate, destination)
+		end
+	end
 
-			-- Collect ancestor folders between container (exclusive) and module's parent (inclusive)
-			local ancestors: { Instance } = {}
-			local cursor: Instance? = module.Parent
-			while cursor and cursor ~= container do
-				table.insert(ancestors, 1, cursor)
-				cursor = cursor.Parent
-			end
-			if cursor ~= container then
-				newWarn(
-					`Module '{module:GetFullName()}' is not a descendant of any provided container; skipping RelocateToReplicatedStorage.`
-				)
-				continue
-			end
-
-			if not destination then
-				destination = ensureReplicatedRelocatedFolder()
-			end
-			local originalParent = module.Parent
-			local dottedPath = getDottedPathToContainer(module, container)
-			-- Record the module's full original ServerScriptService path so each client can
-			-- rebuild that hierarchy locally and drop a pointer at the leaf. This is what lets
-			-- SSS-pointing require paths (e.g. require(game.ServerScriptService.A.B.C)) resolve
-			-- on the client even though the real module now lives in ReplicatedStorage. The
-			-- attribute travels with the instance into RS and replicates to clients.
-			local originalSSSPath = getDottedPathFromService(module, ServerScriptService)
-			if originalSSSPath then
-				module:SetAttribute("_OriginalSSSPath", originalSSSPath)
-			end
-			local mirroredParent = getOrCreateMirroredParent(destination :: Folder, ancestors)
-
-			local pointer = relocatedTemplate:Clone()
-			pointer.Name = module.Name
-			pointer:SetAttribute("_RelocatedService", "ReplicatedStorage")
-			pointer:SetAttribute("_RelocatedPath", dottedPath)
-			-- Mirror loader-filter attributes onto the pointer so the server's main
-			-- load pass treats the pointer the same way it would treat the real module.
-			-- Without this, ClientOnly modules would be loaded by the server via
-			-- their pointer (because the pointer itself isn't tagged ClientOnly).
-			for _, attrName in ipairs({ "ClientOnly", "ServerOnly", "IgnoreLoader", "LoaderPriority", "Parallel" }) do
-				local value = module:GetAttribute(attrName)
-				if value ~= nil then
-					pointer:SetAttribute(attrName, value)
+	-- Mirror getModules' tag discovery so tag-only setups (Start() with no containers) relocate too.
+	-- For a tagged Folder the container is the folder's PARENT, not the folder itself, so the tagged
+	-- folder lands in the mirror and getOrCreateMirroredParent copies its LoaderTag onto the
+	-- ReplicatedStorage mirror folder — which is how the client later discovers these modules.
+	if SETTINGS.USE_COLLECTION_SERVICE and TAG ~= "" then
+		for _, tagged in CollectionService:GetTagged(TAG) do
+			if tagged:IsA("ModuleScript") and tagged.Parent then
+				destination = tryRelocateModule(tagged :: ModuleScript, tagged.Parent, seen, relocatedTemplate, destination)
+			elseif tagged:IsA("Folder") and tagged.Parent then
+				-- A descendant reachable via both the outer folder here and its own tag entry is
+				-- relocated once (seen-set); which entry wins the mirror depth is order-dependent.
+				for _, descendant in tagged:GetDescendants() do
+					if descendant:IsA("ModuleScript") then
+						destination = tryRelocateModule(descendant :: ModuleScript, tagged.Parent, seen, relocatedTemplate, destination)
+					end
 				end
 			end
-
-			module.Parent = mirroredParent
-			pointer.Parent = originalParent
 		end
 	end
 end
