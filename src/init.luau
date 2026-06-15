@@ -1,107 +1,112 @@
 --!strict
 --[[
 	----
-	crusherfire's Module Loader!
-	08/05/2025
-	Updated: 05/22/26
+	crusherfire's Module Loader
+	Created: 08/05/2025
+	Updated: 06/15/2026
 	----
-	
-	-- FEATURES --
-	"LoaderPriority" number attribute:
-	Set this attribute on a ModuleScript to modify the loading priority. Larger number == higher priority.
-	Defaults to 0.
 
-	"RelocateToServerScriptService" boolean attribute:
-	Relocates a module to ServerScriptService and leave a pointer in its place to hide server code from clients.
-	This should only be performed on server-only modules that you want to organize within the same containers in Studio.
-	NOTE: relocation happens AFTER the module is required, so yielding in top-level code widens the window where
-	server code is still client-visible (see [SECURITY] warnings below).
-	
-	"RelocateToReplicatedStorage" boolean attribute (on ModuleScript OR Folder):
-	Inverse of RelocateToServerScriptService and keeps the recommended default of having everything living in
-	ServerScriptService while still exposing modules that need to reach the client (shared libraries, client-only modules).
-	Relocates the module BEFORE any require() call via a server-side pre-pass, so there is no in-flight window
-	where server code is client-visible.
-	
-	The module is moved to ReplicatedStorage.RELOCATED_MODULES, with the full folder hierarchy between
-	the container and the module mirrored under that root. This preserves relative require paths such as
-	require(script.Parent.Sibling) and string requires like require("../Sibling"), provided every endpoint
-	of those requires is also relocated.
-	
-	When set on a Folder, the attribute cascades to every descendant ModuleScript (and the mirrored
-	hierarchy is built for the whole subtree). Use this for tightly-coupled shared subtrees so all
-	relative requires inside them keep resolving.
-	
-	A hierarchy-aware pointer is left at the original ServerScriptService location so that server modules
-	requiring the relocated module via relative paths continue to work transparently.
-	
-	Children of the module (e.g., assets stored as descendants) move with the module.
-	Convention: when another module needs to access those children, the owning module should expose them
-	via its return table rather than other modules indexing for them.
-	
-	Setting both RelocateToServerScriptService and RelocateToReplicatedStorage directly on the same
-	module emits a warning and skips relocation. Modules already in ReplicatedStorage also emit a
-	warning and are skipped.
+	A lightweight loader that finds ModuleScripts, loads them in priority order, and runs
+	an optional :Init() then :Start() lifecycle method on each. Runs on the server and the
+	client. Configure it with attributes on modules, on folders (which cascade to their
+	descendant modules), or on the loader script itself.
 
-	OPT-OUT FROM CASCADE: When a Folder ancestor cascades RelocateToReplicatedStorage, you can keep
-	specific descendant modules on the server by setting RelocateToServerScriptService = true on them
-	directly. Those modules skip the ReplicatedStorage pre-pass and are instead picked up by the
-	standard ServerScriptService relocation flow during loading.
-	NOTE: relative requires inside an RS-relocated module pointing at SSS opt-out siblings will not
-	resolve at runtime (the mirrored ReplicatedStorage folder doesn't contain them). Cross-realm
-	references must go through the loader, absolute paths, or remotes.
-	
-	"ClientOnly" or "ServerOnly" boolean attributes:
-	Allows you to restrict a module from being loaded on a specific run context. Also settable
-	on a Folder to cascade to every descendant ModuleScript. A descendant's own attribute
-	(including explicit `false`) overrides the cascade; among nested folders, the closest
-	ancestor wins.
+	-- MODULE ATTRIBUTES --
+	Set on a ModuleScript, or on a Folder to cascade to every descendant ModuleScript.
 
-	"Parallel" boolean attribute:
-	Requires the module from another script within its own actor for executing code in parallel.
+	LoaderPriority (number, default 0)
+		Higher numbers load first.
 
-	"IgnoreLoader" boolean attribute:
-	Allows you to prevent a module from being loaded. Also settable on a Folder to cascade to
-	every descendant ModuleScript (same override semantics as ClientOnly / ServerOnly).
-	
-	Supports CollectionService tags on ModuleScripts AND Folders. Tagging a Folder loads every
-	descendant ModuleScript (subject to ClientOnly / ServerOnly / IgnoreLoader filtering).
-	If a tagged folder is also marked for RelocateToReplicatedStorage, the relocation pre-pass
-	mirrors the tag onto the corresponding folder under ReplicatedStorage.RELOCATED_MODULES so
-	clients discover the relocated modules via the same tag without extra setup. A module that
-	resolves to an already-loaded value (e.g. via both a pointer and its real target) is
-	deduplicated automatically so Init/Start fire once per loaded result.
-	
-	-- LOADER ATTRIBUTE SETTINGS --
-	ClientWaitForPersistentLoaded: Client waits for all persistent models to be loaded in workspace if instance streaming is enabled.
-	ClientWaitForServer: Client avoids starting the module loading process until the server finishes.
-	FolderSearchDepth: How deep the loader will search for modules to load in a folder. '1' represents the direct children.
-	LoaderTag: Tag to be set on ModuleScripts (or Folders, to load every descendant ModuleScript)
-	you want to load that are not within loaded containers.
-	VerboseLoading: If messages should be output that document the loading process
-	YieldThreshold: How long to wait (in seconds) before displaying warning messages when a particular module is yielidng for too long
-	UseCollectionService: If the loader should search for modules to load based on LoaderTag
-	
-	-- DEFAULT FILTERING BEHAVIOR --
-	Respects "ClientOnly", "ServerOnly", and "IgnoreLoader" attributes.
-	
-	Modules that are not a direct child of a given container or whose ancestry are not folders
-	that lead back to a container will not be loaded when the FolderSearchDepth is a larger value.
-	
-	NOTE:
-	If you do not like this default filtering behavior, you can pass your own filtering predicate to the StartCustom() function
-	and define your own behavior. Otherwise, use the Start() function for the default behavior!
-	
-	-- LOADER STATE ATTRIBUTES (on this ModuleLoader script itself) --
-	"RelocationComplete": Set to true by the server immediately after the RelocateToReplicatedStorage
-	pre-pass completes. Clients yield on this attribute before starting their own loader pass.
-	
-	"ServerLoaded" / "ServerLoadedTimestamp": Replaces the previous workspace.ServerLoaded /
-	workspace.ServerLoadedTimestamp attributes. Read via ModuleLoader.IsServerLoaded() and
-	ModuleLoader.GetServerLoadedTimestamp().
-	BREAKING CHANGE: external code that read these flags from workspace directly must switch
-	to reading from the ModuleLoader script (or use the API methods).
-	--------------
+	ClientOnly / ServerOnly (boolean)
+		Restrict a module to one run context. A value set on the module itself (even
+		false) overrides a cascading folder value, and the closest folder wins.
+
+	IgnoreLoader (boolean)
+		Skip the module completely. Same cascade and override rules as ClientOnly.
+
+	Parallel (boolean)
+		Require the module inside its own Actor so its code can run in parallel.
+
+	RelocateToServerScriptService (boolean)
+		Move a server-only module into ServerScriptService after it is required and leave
+		a pointer in its place. Hides server code from clients while keeping modules
+		organized inside shared containers.
+		Gotcha: the move happens after the require, so yielding in top-level code keeps the
+		module visible to clients for longer. Avoid yielding at the top level.
+
+	RelocateToReplicatedStorage (boolean)
+		The inverse. Keep everything in ServerScriptService by default and expose only the
+		modules clients need. A server pre-pass moves the module into
+		ReplicatedStorage.RELOCATED_MODULES before any require runs, so the code is never
+		briefly visible to clients.
+
+		The folders between the container and the module are mirrored under that root, so
+		relative requires like require(script.Parent.Sibling) and string requires like
+		require("../Sibling") keep working when every endpoint is also relocated. A
+		pointer stays at the original location so server-side requires still resolve.
+
+		Client rebuild (default since v3.0):
+			Every client recreates the module's original ServerScriptService path inside its
+			own local ServerScriptService, with a pointer at the leaf that resolves to the
+			real module in ReplicatedStorage. A path such as require(game.ServerScriptService.A.B.C)
+			then resolves the same on client and server. The real module still exists only once,
+			in ReplicatedStorage.
+
+		Cascade: set on a Folder to relocate the whole subtree. Opt one descendant back
+		out by setting RelocateToServerScriptService = true on it.
+
+		Gotchas:
+			Descendants of a relocated module (assets, child modules) move with it. Expose
+			them through the module's return table instead of indexing for them directly.
+
+			An opted-out, server-only sibling cannot be reached by a relative require on the
+			client, since it stays in ServerScriptService. Cross realms through the loader,
+			an absolute path, or a remote.
+
+			Setting both Relocate attributes on one module warns and skips it. A module
+			already in ReplicatedStorage also warns and is skipped.
+
+	-- COLLECTION SERVICE --
+	Enable UseCollectionService and tag ModuleScripts or Folders with LoaderTag to load
+	modules that live outside the containers you pass in. Tagging a Folder loads every
+	descendant ModuleScript, subject to the filtering attributes above. Tags on a
+	relocated folder are mirrored into ReplicatedStorage so clients find the modules by
+	the same tag. A module that resolves to an already loaded value is deduplicated, so
+	Init and Start run once per result.
+
+	-- LOADER SETTINGS --
+	Set as attributes on the ModuleLoader script. ChangeSettings() overrides them at runtime.
+
+	FolderSearchDepth (number, default 1)
+		How deep to search a container, where 1 is its direct children.
+	YieldThreshold (number, default 10)
+		Seconds a module may run before a slow-load warning logs.
+	VerboseLoading (boolean)
+		Log each step of the loading process.
+	UseCollectionService (boolean)
+		Discover modules to load by LoaderTag.
+	LoaderTag (string, default LOAD_MODULE)
+		The tag used for CollectionService discovery.
+	ClientWaitForServer (boolean)
+		Client waits for the server to finish loading before it starts.
+	ClientWaitForPersistentLoaded (boolean)
+		Client waits for persistent models to stream into workspace first.
+
+	-- DEFAULT FILTERING --
+	Start() loads a module only when its path back to the container is all folders and it
+	sits within FolderSearchDepth, and it respects ClientOnly, ServerOnly, and IgnoreLoader.
+	Pass your own predicate to StartCustom() to replace this behavior.
+
+	-- LOADER STATE (attributes on this script) --
+	RelocationComplete
+		Set by the server once the relocation pre-pass finishes.
+		Clients wait on it before running their own pass.
+	ServerLoaded / ServerLoadedTimestamp
+		Read them through IsServerLoaded() and GetServerLoadedTimestamp().
+
+	Breaking change:
+		ServerLoaded and ServerLoadedTimestamp now live on this script instead of on workspace.
+		Code that read them from workspace must use the API methods.
 ]]
 
 -----------------------------
@@ -445,6 +450,47 @@ local function getDottedPathToContainer(module: Instance, container: Instance): 
 end
 
 --[[
+	Returns the dot-separated path from <code>service</code> (exclusive) down to <code>instance</code>
+	(inclusive), e.g. "Gameplay.Combat.DamageMath". Returns <code>nil</code> if <code>instance</code>
+	is not a descendant of <code>service</code>. Unlike getDottedPathToContainer this anchors to a
+	service so the client can rebuild the full original hierarchy under its own local ServerScriptService.
+]]
+local function getDottedPathFromService(instance: Instance, service: Instance): string?
+	local segments = { instance.Name }
+	local current: Instance? = instance.Parent
+	while current and current ~= service do
+		table.insert(segments, 1, current.Name)
+		current = current.Parent
+	end
+	if current ~= service then
+		return nil
+	end
+	return table.concat(segments, ".")
+end
+
+--[[
+	Client-only: FindFirstChild-or-creates a plain Folder for each segment under <code>root</code>,
+	mirroring an original ServerScriptService folder chain. Returns the deepest folder (or
+	<code>root</code> itself if <code>segments</code> is empty). These folders are passive scaffolding
+	for relocated-module pointers, so no tags/attributes are mirrored onto them.
+]]
+local function getOrCreateClientFolderPath(root: Instance, segments: { string }): Instance
+	local current: Instance = root
+	for _, name in ipairs(segments) do
+		local existing = current:FindFirstChild(name)
+		if existing and existing:IsA("Folder") then
+			current = existing
+		else
+			local folder = Instance.new("Folder")
+			folder.Name = name
+			folder.Parent = current
+			current = folder
+		end
+	end
+	return current
+end
+
+--[[
 	Given the ordered list of original ancestor folders (outermost to innermost,
 	exclusive of both the container and the module itself), creates or reuses
 	Folder instances under <code>rootFolder</code> to mirror the chain. Returns the deepest
@@ -576,6 +622,15 @@ local function relocateToReplicatedStoragePass(containers: { Instance })
 			end
 			local originalParent = module.Parent
 			local dottedPath = getDottedPathToContainer(module, container)
+			-- Record the module's full original ServerScriptService path so each client can
+			-- rebuild that hierarchy locally and drop a pointer at the leaf. This is what lets
+			-- SSS-pointing require paths (e.g. require(game.ServerScriptService.A.B.C)) resolve
+			-- on the client even though the real module now lives in ReplicatedStorage. The
+			-- attribute travels with the instance into RS and replicates to clients.
+			local originalSSSPath = getDottedPathFromService(module, ServerScriptService)
+			if originalSSSPath then
+				module:SetAttribute("_OriginalSSSPath", originalSSSPath)
+			end
 			local mirroredParent = getOrCreateMirroredParent(destination :: Folder, ancestors)
 
 			local pointer = relocatedTemplate:Clone()
@@ -1046,6 +1101,63 @@ local function waitForRelocationReady()
 	connection:Disconnect()
 end
 
+--[[
+	Client-only: Reconstructs the original ServerScriptService folder hierarchy inside the client's
+	OWN local ServerScriptService, placing a pointer at each leaf that resolves to the real module in
+	ReplicatedStorage.RELOCATED_MODULES. This makes require paths that point at ServerScriptService
+	(both instance requires like require(game.ServerScriptService.A.B.C) and string/relative requires)
+	resolve identically to the server, even though the real module now lives in ReplicatedStorage.
+
+	The real module lives exactly once (in RS); each rebuilt leaf is a stock RelocatedTemplate clone,
+	so there is no duplicated module code. Discovery is unaffected: the loader still loads the real
+	modules out of RELOCATED_MODULES — these pointers exist purely so SSS paths resolve at runtime.
+
+	Must run AFTER waitForRelocationReady (so RELOCATED_MODULES is fully populated and pointer
+	resolution is instant) and BEFORE the load/init/start phases (so the tree exists before any module
+	code can hit an SSS require path).
+]]
+local function rebuildServerScriptServiceHierarchy()
+	if not RunService:IsClient() then
+		return
+	end
+	local relocated = ReplicatedStorage:FindFirstChild("RELOCATED_MODULES")
+	if not relocated then
+		-- Nothing was relocated this session; costs the client nothing.
+		return
+	end
+	local relocatedTemplate = script:FindFirstChild("RelocatedTemplate")
+	assert(relocatedTemplate, "ModuleLoader missing RelocatedTemplate child")
+
+	for _, module in ipairs(findAllFromClass("ModuleScript", relocated) :: { ModuleScript }) do
+		local originalSSSPath = module:GetAttribute("_OriginalSSSPath")
+		-- Only top-level relocated modules carry _OriginalSSSPath; child/asset modules that moved
+		-- with their parent don't, and are intentionally not rebuilt (accessed via the parent's
+		-- return table by convention).
+		if typeof(originalSSSPath) ~= "string" or originalSSSPath == "" then
+			continue
+		end
+
+		local segments: { string } = string.split(originalSSSPath, ".")
+		local leafName = table.remove(segments) :: string
+
+		local parent = getOrCreateClientFolderPath(ServerScriptService, segments)
+		-- Idempotent: never build a second pointer over an existing leaf.
+		if parent:FindFirstChild(leafName) then
+			continue
+		end
+
+		-- Path under RELOCATED_MODULES is exactly what the pointer must resolve to. Derived from the
+		-- module's actual RS position so it can't drift from where the module really lives.
+		local relocatedPath = getDottedPathToContainer(module, relocated)
+
+		local pointer = relocatedTemplate:Clone()
+		pointer.Name = leafName
+		pointer:SetAttribute("_RelocatedService", "ReplicatedStorage")
+		pointer:SetAttribute("_RelocatedPath", relocatedPath)
+		pointer.Parent = parent
+	end
+end
+
 -----------------------------
 -- MAIN --
 -----------------------------
@@ -1062,6 +1174,7 @@ local function start(...: Instance)
 		script:SetAttribute("RelocationComplete", true)
 	else
 		waitForRelocationReady()
+		rebuildServerScriptServiceHierarchy()
 	end
 	if
 		isClient
