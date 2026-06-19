@@ -44,6 +44,9 @@
 		relative requires like require(script.Parent.Sibling) and string requires like
 		require("../Sibling") keep working when every endpoint is also relocated. A
 		pointer stays at the original location so server-side requires still resolve.
+		Each mirrored folder also receives a one-time snapshot of its original folder's
+		attributes, so a relocated module's script.Parent:GetAttribute(...) keeps working
+		(e.g. system config stored on a folder/package root).
 
 		Client rebuild (default since v3.0):
 			Every client recreates the module's original ServerScriptService path inside its
@@ -521,12 +524,20 @@ local function getOrCreateMirroredParent(rootFolder: Folder, ancestors: { Instan
 				CollectionService:AddTag(current, TAG)
 			end
 		end
-		-- Mirror cascade-relevant attributes so client-side keepModule resolves the
-		-- same run-context restrictions the user expressed on the original folder.
-		for _, attrName in ipairs({ "ClientOnly", "ServerOnly", "IgnoreLoader" }) do
-			local value = original:GetAttribute(attrName)
-			if value ~= nil and current:GetAttribute(attrName) == nil then
-				current:SetAttribute(attrName, value)
+		-- Mirror ALL of the original folder's attributes onto the mirror folder (a one-time
+		-- snapshot taken at relocation). A relocated module's script.Parent is this mirror folder
+		-- on both realms, so this keeps script.Parent:GetAttribute(...) working after relocation
+		-- (e.g. system config stored on a package root). This also covers the cascade attributes
+		-- (ClientOnly/ServerOnly/IgnoreLoader) so client-side keepModule still resolves the same
+		-- run-context restrictions. The loader's own control flags are skipped so the mirror never
+		-- carries confusing relocation markers. The == nil guard keeps a reused mirror folder
+		-- (shared by sibling modules) from being re-stomped.
+		for name, value in original:GetAttributes() do
+			if name == "RelocateToReplicatedStorage" or name == "RelocateToServerScriptService" then
+				continue
+			end
+			if current:GetAttribute(name) == nil then
+				current:SetAttribute(name, value)
 			end
 		end
 	end
