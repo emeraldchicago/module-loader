@@ -2,7 +2,6 @@
   "properties": {
     "Attributes": {
       "Loaded": false
-    },
-    "Sandboxed": true
+    }
   }
 }
