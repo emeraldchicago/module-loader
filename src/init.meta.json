@@ -8,7 +8,6 @@
       "ClientWaitForPersistentLoaded": true,
       "LoaderTag": "LOAD_MODULE",
       "VerboseLoading": "true"
-    },
-    "Sandboxed": true
+    }
   }
 }
