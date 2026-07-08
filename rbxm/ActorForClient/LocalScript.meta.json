@@ -1,0 +1,11 @@
+{
+  "properties": {
+    "Attributes": {
+      "LoadedModule": false,
+      "Loaded": false,
+      "Initialized": false,
+      "Started": false
+    },
+    "Sandboxed": true
+  }
+}

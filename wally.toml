@@ -1,12 +1,12 @@
 [package]
-name = "crusherfire/module-loader"
-description = "A simple attribute-driven module loader for Roblox with with module relocation and parallel execution support."
+name = "emeraldchicago/module-loader"
+description = "A simple attribute-driven module loader for Roblox with with module relocation and parallel execution support. - fixed for argon"
 version = "3.0.3"
 license = "MIT"
-authors = ["ActualFire Games LLC"]
+authors = ["emeraldchicago"]
 realm = "shared"
 registry = "https://github.com/upliftgames/wally-index"
-repository = "https://github.com/ActualFire-Games/module-loader"
+repository = "https://github.com/emeraldchicago/module-loader"
 exclude = [
     "**",
 ]

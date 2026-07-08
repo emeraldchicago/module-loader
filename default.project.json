@@ -3,10 +3,10 @@
   "tree": {
     "$path": "src",
     "ActorForServer": {
-      "$path": "rbxm/ActorForServer.rbxmx"
+      "$path": "rbxm/ActorForServer"
     },
     "ActorForClient": {
-      "$path": "rbxm/ActorForClient.rbxmx"
+      "$path": "rbxm/ActorForClient"
     }
   }
 }

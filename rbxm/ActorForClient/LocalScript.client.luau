@@ -2,17 +2,19 @@
 --@author: crusherfire
 --@date: 5/8/24
 --[[@description:
-	Should be placed as a child script of the actor.
+	General code for loading parallel module scripts.
 ]]
 -----------------------------
 -- DEPENDENCIES --
 -----------------------------
+-- The loader clones the ParallelModuleLoader into this actor as a sibling of this LocalScript,
+-- so we resolve it relatively rather than hardcoding a path under ReplicatedStorage.
 local ParallelModuleLoader = require(script.Parent:WaitForChild("ParallelModuleLoader"))
 
 -----------------------------
 -- VARIABLES --
 -----------------------------
-local actor: Actor = script.Parent
+local actor = script.Parent
 
 -----------------------------
 -- HANDLERS --

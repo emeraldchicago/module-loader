@@ -1,5 +1,7 @@
 {
-	"properties": {
-		"Disabled": true
-	}
+  "properties": {
+    "Disabled": true,
+    "RunContext": "Client",
+    "Sandboxed": true
+  }
 }

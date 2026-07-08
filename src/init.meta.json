@@ -1,0 +1,14 @@
+{
+  "properties": {
+    "Attributes": {
+      "YieldThreshold": 10,
+      "FolderSearchDepth": 2,
+      "UseCollectionService": true,
+      "ClientWaitForServer": true,
+      "ClientWaitForPersistentLoaded": true,
+      "LoaderTag": "LOAD_MODULE",
+      "VerboseLoading": "true"
+    },
+    "Sandboxed": true
+  }
+}
